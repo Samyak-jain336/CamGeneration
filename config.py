@@ -14,22 +14,47 @@ DB_CONFIG = {
     "database": "cam_db"
 }
 
-# -- Anthropic -----------------------------------------------
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")  
-LLM_MODEL    = "llama-3.3-70b-versatile"
+# -- LLM Providers -------------------------------------------
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY_2 = os.getenv("GROQ_API_KEY_2")
+GROQ_API_KEY_3 = os.getenv("GROQ_API_KEY_3")
+GROQ_API_KEY_4 = os.getenv("GROQ_API_KEY_4")
+GROQ_API_KEY_5 = os.getenv("GROQ_API_KEY_5")
+GROQ_API_KEY_6 = os.getenv("GROQ_API_KEY_6")
+GROQ_MODEL     = "llama-3.3-70b-versatile"
+LLM_MODEL = GROQ_MODEL
+
+OLLAMA_MODEL   = "llama3.1:8b"   # must be pulled locally via: ollama pull llama3.1:8b
+OLLAMA_URL     = "http://localhost:11434/api/generate"
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL   = "gpt-4o-mini"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-LLM_MODEL1      = "gemini-2.0-flash"   # free tier, fast
+GEMINI_MODEL   = "gemini-3.1-flash-lite"
 
 # -- Input Document Paths ------------------------------------
+'''DOC_PATHS = {
+    "annual_report": "inputs1/Passionfruit_Inc_Annual_Report_10K_FY2025.pdf",
+    "audit_report":  "inputs1/Passionfruit_Inc_Audit_Report_FY2025.pdf",
+    "save_risk":     "inputs1/Passionfruit_Inc_SAVE_Risk_FY2025.xlsx"  
+}
+'''
+DOC_PATHS = {
+    "annual_report": "NewInputs/annualReport.pdf",
+    "audit_report":  "NewInputs/auditReport.pdf",
+    "save_risk":     "NewInputs/saveRisk.xlsx"  
+}
+
+'''
 DOC_PATHS = {
     "annual_report": "inputs/annual_report.pdf",
     "audit_report":  "inputs/audit_report.pdf",
     "save_risk":     "inputs/save_risk_file.xlsx"  
-}
+}'''
 
 # -- Output --------------------------------------------------
-OUTPUT_CAM_PATH = "outputs/final_cam.docx"
+OUTPUT_CAM_PATH = "outputs/final_cam1.docx"
 
 # -- Queue / Retry -------------------------------------------
 MAX_RETRIES = 3

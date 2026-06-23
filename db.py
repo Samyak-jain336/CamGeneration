@@ -1,4 +1,5 @@
 import json
+import re
 import mysql.connector
 from mysql.connector import Error
 from config import DB_CONFIG
@@ -18,14 +19,13 @@ SCHEMA_SQL = [
         id              INT AUTO_INCREMENT PRIMARY KEY,
         company_name    VARCHAR(255),
         cin             VARCHAR(50),
-        constitution    VARCHAR(100),
+        constitution    VARCHAR(255),
         incorporation_year INT,
         registered_office TEXT,
         business_nature TEXT,
         promoters       JSON,
         key_management  JSON,
-        shareholding    JSON,
-        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        shareholding    JSON
     )
     """,
 
@@ -35,6 +35,7 @@ SCHEMA_SQL = [
         id                      INT AUTO_INCREMENT PRIMARY KEY,
         company_name            VARCHAR(255),
         fiscal_year             VARCHAR(10),
+        currency_unit           VARCHAR(50),
         revenue                 DECIMAL(15,2),
         other_income            DECIMAL(15,2),
         total_revenue           DECIMAL(15,2),
@@ -66,8 +67,7 @@ SCHEMA_SQL = [
         cash_from_operations    DECIMAL(15,2),
         cash_from_investing     DECIMAL(15,2),
         cash_from_financing     DECIMAL(15,2),
-        closing_cash            DECIMAL(15,2),
-        created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        closing_cash            DECIMAL(15,2)
     )
     """,
 
@@ -85,7 +85,17 @@ SCHEMA_SQL = [
         observations        JSON,
         summary_assessment  JSON,
         contingent_liabilities JSON,
-        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        other_findings      JSON
+    )
+    """,
+
+    # -- Raw Documents (audit report only — safety net) ------
+    """
+    CREATE TABLE IF NOT EXISTS raw_documents (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        company_name    VARCHAR(255),
+        fiscal_year     VARCHAR(10),
+        raw_text        LONGTEXT
     )
     """,
 
@@ -95,32 +105,30 @@ SCHEMA_SQL = [
         id                  INT AUTO_INCREMENT PRIMARY KEY,
         company_name        VARCHAR(255),
         assessment_date     VARCHAR(20),
-        save_score          DECIMAL(5,2),
+        composite_score     DECIMAL(5,2),
         save_rating         VARCHAR(50),
         previous_rating     VARCHAR(50),
         rating_movement     VARCHAR(50),
-        solvency_score      DECIMAL(5,2),
-        asset_score         DECIMAL(5,2),
-        viability_score     DECIMAL(5,2),
-        external_score      DECIMAL(5,2),
+        risk_dimensions     JSON,
         risk_flags          JSON,
-        watch_list_triggers JSON,
-        created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
+        watch_list_triggers JSON
+    )   
     """,
 
-    # -- Banking & Borrowing History -------------------------
+    # -- Credit Profile (replaces banking_history) -----------
     """
-    CREATE TABLE IF NOT EXISTS banking_history (
-        id              INT AUTO_INCREMENT PRIMARY KEY,
-        company_name    VARCHAR(255),
-        lender          VARCHAR(255),
-        facility_type   VARCHAR(100),
-        purpose         VARCHAR(255),
-        interest_rate   DECIMAL(5,2),
-        outstanding_amt DECIMAL(15,2),
-        fiscal_year     VARCHAR(10),
-        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    CREATE TABLE IF NOT EXISTS credit_profile (
+        id                  INT AUTO_INCREMENT PRIMARY KEY,
+        company_name        VARCHAR(255),
+        instrument_type     VARCHAR(100),
+        counterparty        VARCHAR(255),
+        purpose             VARCHAR(255),
+        interest_rate       DECIMAL(5,2),
+        outstanding_amt     DECIMAL(15,2),
+        maturity_date       VARCHAR(50),
+        credit_rating       VARCHAR(50),
+        covenants           TEXT,
+        fiscal_year         VARCHAR(10)
     )
     """,
 
@@ -129,11 +137,38 @@ SCHEMA_SQL = [
     CREATE TABLE IF NOT EXISTS collateral_info (
         id              INT AUTO_INCREMENT PRIMARY KEY,
         company_name    VARCHAR(255),
-        security_type   VARCHAR(100),
+        security_type   VARCHAR(255),
         description     TEXT,
         value_lakhs     DECIMAL(15,2),
-        remarks         TEXT,
-        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        remarks         TEXT
+    )
+    """,
+
+    # -- Inconsistencies -------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS inconsistencies (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        company_name    VARCHAR(255),
+        field_name      VARCHAR(255),
+        source_1        VARCHAR(100),
+        value_1         TEXT,
+        source_2        VARCHAR(100),
+        value_2         TEXT,
+        severity        ENUM('critical', 'minor')
+    )
+    """,
+
+    # -- Reconciliation Results (deterministic, no LLM involved) ----
+    """
+    CREATE TABLE IF NOT EXISTS reconciliation_results (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        company_name    VARCHAR(255),
+        fiscal_year     VARCHAR(10),
+        metric_name     VARCHAR(100),
+        computed_value  DECIMAL(15,4),
+        stored_value    DECIMAL(15,4),
+        delta_pct       DECIMAL(8,4),
+        status          ENUM('match', 'mismatch', 'no_data', 'unverifiable', 'computed')
     )
     """,
 
@@ -144,9 +179,7 @@ SCHEMA_SQL = [
         task_name   VARCHAR(100),
         status      ENUM('pending','in_progress','done','failed') DEFAULT 'pending',
         retries     INT DEFAULT 0,
-        error_msg   TEXT,
-        created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        error_msg   TEXT
     )
     """
 ]
@@ -167,7 +200,8 @@ def setup_schema():
 def drop_and_recreate():
     """Wipes all tables and recreates them — use during dev only."""
     tables = [
-        "task_queue", "collateral_info", "banking_history",
+        "task_queue", "reconciliation_results", "inconsistencies",
+        "collateral_info", "credit_profile", "raw_documents",
         "risk_ratings", "audit_findings", "financials", "borrower_profile"
     ]
     conn = get_connection()
@@ -288,24 +322,59 @@ def save_borrower_profile(data: dict):
     cursor.close()
     conn.close()
 
+def normalize_fiscal_year(fy: str) -> str:
+    """
+    Normalizes fiscal year labels to a consistent format.
+    Examples:
+      "FY2025"  → "FY2025"
+      "2025"    → "FY2025"
+      "FY24"    → "FY2024"
+      "FY22"    → "FY2022"
+    """
+    if not fy:
+        return fy
+    fy = str(fy).strip()
+    # Strip FY prefix if present to get the raw number
+    raw = fy.upper().lstrip("FY").strip()
+    # Handle 2-digit years like 22, 23, 24
+    if len(raw) == 2 and raw.isdigit():
+        raw = "20" + raw
+    return "FY" + raw
+
 
 def save_financials(rows: list):
     """rows: list of dicts, one per fiscal year."""
     conn = get_connection()
     cursor = conn.cursor()
     for r in rows:
+        r["fiscal_year"] = normalize_fiscal_year(r.get("fiscal_year", ""))
+        # Skip if this company+fiscal_year already has a fuller row
+        cursor.execute(
+            "SELECT id FROM financials WHERE company_name=%s AND fiscal_year=%s",
+            (r.get("company_name"), r.get("fiscal_year"))
+        )
+        existing = cursor.fetchone()
+        if existing:
+            # Only replace if new row has more non-null values
+            cursor.execute("SELECT * FROM financials WHERE id=%s", (existing[0],))
+            old = cursor.fetchone()
+            old_nulls = sum(1 for v in old if v is None)
+            new_nulls = sum(1 for v in r.values() if v is None)
+            if new_nulls >= old_nulls:
+                continue  # existing row is better or equal, skip
+            cursor.execute("DELETE FROM financials WHERE id=%s", (existing[0],))
         cursor.execute("""
             INSERT INTO financials
-            (company_name, fiscal_year, revenue, other_income, total_revenue,
+            (company_name, fiscal_year, currency_unit, revenue, other_income, total_revenue,
              cost_of_materials, employee_expense, finance_costs, depreciation,
              other_expenses, pbt, tax, pat, ebitda, ebitda_margin, pat_margin,
              current_ratio, quick_ratio, debt_equity_ratio, icr, dscr,
              roe, roce, asset_turnover, inventory_days, debtor_days,
              working_capital_days, total_assets, total_equity, total_borrowings,
              cash_from_operations, cash_from_investing, cash_from_financing, closing_cash)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
-            r.get("company_name"), r.get("fiscal_year"),
+            r.get("company_name"), r.get("fiscal_year"), r.get("currency_unit"),
             r.get("revenue"), r.get("other_income"), r.get("total_revenue"),
             r.get("cost_of_materials"), r.get("employee_expense"),
             r.get("finance_costs"), r.get("depreciation"), r.get("other_expenses"),
@@ -331,8 +400,8 @@ def save_audit_findings(data: dict):
         INSERT INTO audit_findings
         (company_name, audit_year, auditor_name, firm_reg_no, opinion,
          key_audit_matters, caro_findings, observations,
-         summary_assessment, contingent_liabilities)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+         summary_assessment, contingent_liabilities, other_findings)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, (
         data.get("company_name"), data.get("audit_year"),
         data.get("auditor_name"), data.get("firm_reg_no"), data.get("opinion"),
@@ -340,29 +409,27 @@ def save_audit_findings(data: dict):
         json.dumps(data.get("caro_findings", [])),
         json.dumps(data.get("observations", [])),
         json.dumps(data.get("summary_assessment", {})),
-        json.dumps(data.get("contingent_liabilities", []))
+        json.dumps(data.get("contingent_liabilities", [])),
+        json.dumps(data.get("other_findings", []))
     ))
     conn.commit()
     cursor.close()
     conn.close()
-
 
 def save_risk_ratings(data: dict):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO risk_ratings
-        (company_name, assessment_date, save_score, save_rating,
+        (company_name, assessment_date, composite_score, save_rating,
          previous_rating, rating_movement,
-         solvency_score, asset_score, viability_score, external_score,
-         risk_flags, watch_list_triggers)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+         risk_dimensions, risk_flags, watch_list_triggers)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, (
         data.get("company_name"), data.get("assessment_date"),
-        data.get("save_score"), data.get("save_rating"),
+        data.get("composite_score"), data.get("save_rating"),
         data.get("previous_rating"), data.get("rating_movement"),
-        data.get("solvency_score"), data.get("asset_score"),
-        data.get("viability_score"), data.get("external_score"),
+        json.dumps(data.get("risk_dimensions", [])),
         json.dumps(data.get("risk_flags", [])),
         json.dumps(data.get("watch_list_triggers", []))
     ))
@@ -371,19 +438,40 @@ def save_risk_ratings(data: dict):
     conn.close()
 
 
-def save_banking_history(rows: list):
+def _clean_numeric(value):
+    """Strips %, currency symbols, commas, and whitespace from a value
+    that's meant to be numeric but may have arrived as a formatted string
+    (e.g. '9.25%', '₹1,842.40', '1,842.40 lakhs')."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    s = str(value).strip()
+    s = re.sub(r"[^\d.\-]", "", s)
+    if s in ("", "-", "."):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def save_credit_profile(rows: list):
     conn = get_connection()
     cursor = conn.cursor()
     for r in rows:
         cursor.execute("""
-            INSERT INTO banking_history
-            (company_name, lender, facility_type, purpose,
-             interest_rate, outstanding_amt, fiscal_year)
-            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            INSERT INTO credit_profile
+            (company_name, instrument_type, counterparty, purpose,
+             interest_rate, outstanding_amt, maturity_date,
+             credit_rating, covenants, fiscal_year)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
-            r.get("company_name"), r.get("lender"), r.get("facility_type"),
-            r.get("purpose"), r.get("interest_rate"),
-            r.get("outstanding_amt"), r.get("fiscal_year")
+            r.get("company_name"), r.get("instrument_type"), r.get("counterparty"),
+            r.get("purpose"), _clean_numeric(r.get("interest_rate")),
+            _clean_numeric(r.get("outstanding_amt")),
+            r.get("maturity_date"), r.get("credit_rating"),
+            r.get("covenants"), r.get("fiscal_year")
         ))
     conn.commit()
     cursor.close()
@@ -405,6 +493,34 @@ def save_collateral_info(rows: list):
     conn.commit()
     cursor.close()
     conn.close()
+
+def save_raw_document(company_name: str, fiscal_year: str, raw_text: str):
+    """Stores the full unprocessed audit report text, before LLM extraction
+    runs. Safety net — if structured extraction misses something (e.g. an
+    'advantages' section), the source text is still recoverable here."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO raw_documents (company_name, fiscal_year, raw_text)
+        VALUES (%s,%s,%s)
+    """, (company_name, fiscal_year, raw_text))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def get_raw_document(company_name: str) -> str:
+    """Returns the raw audit report text for this company."""
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        "SELECT raw_text FROM raw_documents WHERE company_name=%s ORDER BY id DESC LIMIT 1",
+        (company_name,)
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row["raw_text"] if row else ""
 
 
 # ============================================================
@@ -452,7 +568,7 @@ def get_audit_findings(company_name: str) -> dict:
     cursor.close()
     conn.close()
     if row:
-        for f in ["key_audit_matters","caro_findings","observations","summary_assessment","contingent_liabilities"]:
+        for f in ["key_audit_matters","caro_findings","observations","summary_assessment","contingent_liabilities","other_findings"]:
             if row.get(f):
                 row[f] = json.loads(row[f])
     return row or {}
@@ -469,17 +585,16 @@ def get_risk_ratings(company_name: str) -> dict:
     cursor.close()
     conn.close()
     if row:
-        for f in ["risk_flags", "watch_list_triggers"]:
+        for f in ["risk_dimensions", "risk_flags", "watch_list_triggers"]:
             if row.get(f):
                 row[f] = json.loads(row[f])
     return row or {}
 
-
-def get_banking_history(company_name: str) -> list:
+def get_credit_profile(company_name: str) -> list:
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
-        "SELECT * FROM banking_history WHERE company_name = %s ORDER BY fiscal_year DESC",
+        "SELECT * FROM credit_profile WHERE company_name = %s ORDER BY fiscal_year DESC",
         (company_name,)
     )
     rows = cursor.fetchall()
@@ -499,6 +614,80 @@ def get_collateral_info(company_name: str) -> list:
     cursor.close()
     conn.close()
     return rows
+
+def save_inconsistencies(rows: list):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM inconsistencies WHERE company_name = %s", (rows[0].get("company_name"),))
+    for r in rows:
+        cursor.execute("""
+            INSERT INTO inconsistencies
+            (company_name, field_name, source_1, value_1, source_2, value_2, severity)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """, (
+            r.get("company_name"), r.get("field_name"),
+            r.get("source_1"), r.get("value_1"),
+            r.get("source_2"), r.get("value_2"),
+            r.get("severity")
+        ))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def get_inconsistencies(company_name: str) -> list:
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        "SELECT * FROM inconsistencies WHERE company_name = %s ORDER BY severity ASC",
+        (company_name,)
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return rows
+
+
+def save_reconciliation_results(rows: list):
+    """Wipes prior results for this company, then inserts fresh ones.
+    Called once per run from parser_node, right after financials are parsed —
+    no LLM involved anywhere in this path."""
+    if not rows:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM reconciliation_results WHERE company_name = %s",
+        (rows[0].get("company_name"),)
+    )
+    for r in rows:
+        cursor.execute("""
+            INSERT INTO reconciliation_results
+            (company_name, fiscal_year, metric_name, computed_value,
+             stored_value, delta_pct, status)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """, (
+            r.get("company_name"), r.get("fiscal_year"), r.get("metric_name"),
+            r.get("computed_value"), r.get("stored_value"),
+            r.get("delta_pct"), r.get("status")
+        ))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def get_reconciliation_results(company_name: str) -> list:
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        "SELECT * FROM reconciliation_results WHERE company_name = %s ORDER BY fiscal_year ASC, metric_name ASC",
+        (company_name,)
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return rows
+
 
 if __name__ == "__main__":
     print("Setting up database schema...")

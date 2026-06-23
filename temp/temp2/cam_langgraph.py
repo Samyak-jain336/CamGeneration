@@ -10,7 +10,9 @@ from langgraph.graph import StateGraph, START, END
 from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
 from langchain_google_genai import ChatGoogleGenerativeAI
-
+from config import OUTPUT_CAM_PATH
+# OpenAI swap — uncomment below and comment Groq when switching
+# from config import OPENAI_API_KEY, LLM_MODEL, OUTPUT_CAM_PATH
 
 
 from config import GROQ_API_KEY, LLM_MODEL, OUTPUT_CAM_PATH, GEMINI_API_KEY, LLM_MODEL1
@@ -19,15 +21,18 @@ from db import (
     increment_retry, get_task_status,
     get_borrower_profile, get_financials,
     get_audit_findings, get_risk_ratings,
-    get_banking_history, get_collateral_info,
+    get_credit_profile, get_collateral_info,
     get_connection
 )
-from parser_agents import run_parser_agent
+from temp.parser_agents import run_parser_agent
+from section_generation_final import SectionGenerationAgent
+
+sga = SectionGenerationAgent()
 
 load_dotenv()
 
 #LLM Setup
-llm = ChatGroq(model_name=LLM_MODEL, api_key=GROQ_API_KEY, max_tokens=2048)
+#llm = ChatGroq(model_name=LLM_MODEL, api_key=GROQ_API_KEY, max_tokens=2048)
 '''llm = ChatOllama(
     model="llama3.2",
     temperature=0
@@ -55,7 +60,7 @@ TASK_ORDER = [
     "parse",
     "overview",
     "financial",
-    "industry",
+    "credit_profile",
     "risk",
     "recommendation"
 ]
@@ -80,7 +85,7 @@ def orchestrator(state: CAMState) -> dict:
         "retry_count": {
             "overview":         0,
             "financial":        0,
-            "industry":         0,
+            "credit_profile":   0,
             "risk":             0,
             "recommendation":   0
         },
@@ -126,7 +131,7 @@ def parser_node(state: CAMState) -> dict:
 
         mark_task("parse", "done")
         print(f"[Parser Node] Done. Company: {company}")
-        print(f"[Queue] parse ✓ done")
+        print(f"[Queue] parse done")
 
         return {
             "company_name":     company,
@@ -150,7 +155,7 @@ def parser_node(state: CAMState) -> dict:
         }
 
 # COMMON RUNNER
-def run_section(state: CAMState, section: str, prompt: str) -> dict:
+'''def run_section(state: CAMState, section: str, prompt: str) -> dict:
 
     retries = state["retry_count"].get(section, 0)
     mark_task(section, "in_progress")
@@ -162,7 +167,7 @@ def run_section(state: CAMState, section: str, prompt: str) -> dict:
         mark_task(section, "done")
 
         completed = state.get("completed_tasks", []) + [section]
-        print(f"[Queue] {section} ✓ done")
+        print(f"[Queue] {section} done")
 
         return {
             "sections":        {**state.get("sections", {}), section: res.content},
@@ -184,195 +189,115 @@ def run_section(state: CAMState, section: str, prompt: str) -> dict:
             "errors":      {**state.get("errors", {}), section: str(e)},
             "retry_count": new_retries
         }
-
+'''
 # OVERVIEW AGENT
 def overview_agent(state: CAMState) -> dict:
-    company  = state["company_name"]
-    profile  = get_borrower_profile(company)
+    retries = state["retry_count"].get("overview", 0)
+    mark_task("overview", "in_progress")
+    print(f"\n[OVERVIEW Agent] Running... (attempt {retries + 1}/3)")
+    try:
+        content = sga.generate(state["company_name"], "generate_overview")
+        mark_task("overview", "done")
+        print("[Queue] overview done")
+        return {
+            "sections":        {**state.get("sections", {}), "overview": content},
+            "completed_tasks": state.get("completed_tasks", []) + ["overview"],
+            "current_task":    "overview"
+        }
+    except Exception as e:
+        mark_task("overview", "failed", str(e))
+        increment_retry("overview")
+        new_retries = dict(state["retry_count"])
+        new_retries["overview"] = retries + 1
+        return {"errors": {**state.get("errors", {}), "overview": str(e)}, "retry_count": new_retries}
 
-    prompt = f"""
-You are a senior credit analyst writing a Credit Assessment Memo (CAM).
-Write Section 1 covering:
-1. Executive Summary
-2. Borrower Background
-3. Purpose of Facility
-
-Use ONLY this data. Be specific. Formal banking language. Figures in Rs Lakhs.
-
-Company:         {profile.get('company_name')}
-CIN:             {profile.get('cin')}
-Constitution:    {profile.get('constitution')}
-Incorporated:    {profile.get('incorporation_year')}
-Office:          {profile.get('registered_office')}
-Business:        {profile.get('business_nature')}
-Promoters:       {profile.get('promoters')}
-Key Management:  {profile.get('key_management')}
-Shareholding:    {profile.get('shareholding')}
-Query:           {state['input_query']}
-"""
-    return run_section(state, "overview", prompt)
 
 # FINANCIAL AGENT
 def financial_agent(state: CAMState) -> dict:
-    company    = state["company_name"]
-    financials = get_financials(company)
+    retries = state["retry_count"].get("financial", 0)
+    mark_task("financial", "in_progress")
+    print(f"\n[FINANCIAL Agent] Running... (attempt {retries + 1}/3)")
+    try:
+        content = sga.generate(state["company_name"], "generate_financial")
+        mark_task("financial", "done")
+        print("[Queue] financial done")
+        return {
+            "sections":        {**state.get("sections", {}), "financial": content},
+            "completed_tasks": state.get("completed_tasks", []) + ["financial"],
+            "current_task":    "financial"
+        }
+    except Exception as e:
+        mark_task("financial", "failed", str(e))
+        increment_retry("financial")
+        new_retries = dict(state["retry_count"])
+        new_retries["financial"] = retries + 1
+        return {"errors": {**state.get("errors", {}), "financial": str(e)}, "retry_count": new_retries}
 
-    fin_text = ""
-    for f in financials:
-        fin_text += f"""
---- {f.get('fiscal_year')} ---
-Revenue: {f.get('revenue')} | PAT: {f.get('pat')} | EBITDA: {f.get('ebitda')} ({f.get('ebitda_margin')}%)
-DSCR: {f.get('dscr')} | ICR: {f.get('icr')} | D/E: {f.get('debt_equity_ratio')}
-Current Ratio: {f.get('current_ratio')} | Total Assets: {f.get('total_assets')}
-Cash from Ops: {f.get('cash_from_operations')} | Closing Cash: {f.get('closing_cash')}
-"""
 
-    prompt = f"""
-You are a senior credit analyst writing a Credit Assessment Memo (CAM).
-Write Section 2 covering:
-1. Financial Performance — revenue trends, margins (3 years)
-2. Balance Sheet Analysis — assets, debt, equity
-3. Key Ratios — DSCR, ICR, Current Ratio, D/E with commentary
-4. Cash Flow Analysis
+# CREDIT PROFILE AGENT
+def credit_profile_agent(state: CAMState) -> dict:
+    retries = state["retry_count"].get("credit_profile", 0)
+    mark_task("credit_profile", "in_progress")
+    print(f"\n[CREDIT PROFILE Agent] Running... (attempt {retries + 1}/3)")
+    try:
+        content = sga.generate(state["company_name"], "generate_credit_profile")
+        mark_task("credit_profile", "done")
+        print("[Queue] credit_profile done")
+        return {
+            "sections":        {**state.get("sections", {}), "credit_profile": content},
+            "completed_tasks": state.get("completed_tasks", []) + ["credit_profile"],
+            "current_task":    "credit_profile"
+        }
+    except Exception as e:
+        mark_task("credit_profile", "failed", str(e))
+        increment_retry("credit_profile")
+        new_retries = dict(state["retry_count"])
+        new_retries["credit_profile"] = retries + 1
+        return {"errors": {**state.get("errors", {}), "credit_profile": str(e)}, "retry_count": new_retries}
 
-Compare year on year. Highlight improvements or red flags.
-Formal banking language. Figures in Rs Lakhs.
-
-FINANCIALS:
-{fin_text}
-"""
-    return run_section(state, "financial", prompt)
-
-# INDUSTRY AGENT
-def industry_agent(state: CAMState) -> dict:
-    company = state["company_name"]
-    banking = get_banking_history(company)
-    audit   = get_audit_findings(company)
-
-    banking_text = ""
-    for b in banking:
-        banking_text += f"\n{b.get('lender')} | {b.get('facility_type')} | {b.get('purpose')} | Rate: {b.get('interest_rate')}% | O/S: Rs{b.get('outstanding_amt')}L"
-
-    obs_text = "\n".join([
-        f"- [{o.get('risk_level')}] {o.get('observation')} -> {o.get('management_response')}"
-        for o in audit.get("observations", [])
-    ])
-
-    prompt = f"""
-You are a senior credit analyst writing a Credit Assessment Memo (CAM).
-Write Section 3 covering:
-1. Banking Conduct — track record, any defaults or SMA
-2. Existing Credit Facilities — all loans, rates, outstanding amounts
-3. Repayment Track Record
-
-Be specific with numbers. Formal banking language. Figures in Rs Lakhs.
-
-BANKING FACILITIES:
-{banking_text}
-
-AUDIT OBSERVATIONS:
-{obs_text}
-
-AUDITOR OPINION: {audit.get('opinion')}
-GOING CONCERN:   {audit.get('summary_assessment', {}).get('going_concern')}
-"""
-    return run_section(state, "industry", prompt)
 
 # RISK AGENT
 def risk_agent(state: CAMState) -> dict:
-    company    = state["company_name"]
-    risk       = get_risk_ratings(company)
-    collateral = get_collateral_info(company)
-    audit      = get_audit_findings(company)
+    retries = state["retry_count"].get("risk", 0)
+    mark_task("risk", "in_progress")
+    print(f"\n[RISK Agent] Running... (attempt {retries + 1}/3)")
+    try:
+        content = sga.generate(state["company_name"], "generate_risk")
+        mark_task("risk", "done")
+        print("[Queue] risk done")
+        return {
+            "sections":        {**state.get("sections", {}), "risk": content},
+            "completed_tasks": state.get("completed_tasks", []) + ["risk"],
+            "current_task":    "risk"
+        }
+    except Exception as e:
+        mark_task("risk", "failed", str(e))
+        increment_retry("risk")
+        new_retries = dict(state["retry_count"])
+        new_retries["risk"] = retries + 1
+        return {"errors": {**state.get("errors", {}), "risk": str(e)}, "retry_count": new_retries}
 
-    flags_text = "\n".join([
-        f"- [{f.get('category')} | {f.get('status')}] {f.get('description')}"
-        for f in risk.get("risk_flags", [])
-    ])
-
-    collateral_text = "\n".join([
-        f"- {c.get('security_type')}: {c.get('description')} | Value: Rs{c.get('value_lakhs')}L"
-        for c in collateral
-    ])
-
-    cont_text = "\n".join([
-        f"- {c.get('nature')}: Rs{c.get('amount_lakhs')}L — {c.get('remarks')}"
-        for c in audit.get("contingent_liabilities", [])
-    ])
-
-    prompt = f"""
-You are a senior credit analyst writing a Credit Assessment Memo (CAM).
-Write Section 4 covering:
-1. Risk Assessment — financial, operational, management risks and mitigants
-2. Security and Collateral — primary and collateral security, coverage ratio
-3. Contingent Liabilities
-
-Clearly separate risks from mitigants. Formal banking language. Figures in Rs Lakhs.
-
-SAVE RISK RATING:
-Score: {risk.get('save_score')} | Rating: {risk.get('save_rating')} ({risk.get('rating_movement')} from {risk.get('previous_rating')})
-Solvency: {risk.get('solvency_score')}/30 | Asset: {risk.get('asset_score')}/25
-Viability: {risk.get('viability_score')}/25 | External: {risk.get('external_score')}/20
-
-RISK FLAGS:
-{flags_text}
-
-COLLATERAL:
-{collateral_text}
-
-CONTINGENT LIABILITIES:
-{cont_text}
-"""
-    return run_section(state, "risk", prompt)
 
 # RECOMMENDATION AGENT
 def recommendation_agent(state: CAMState) -> dict:
-    company    = state["company_name"]
-    profile    = get_borrower_profile(company)
-    financials = get_financials(company)
-    risk       = get_risk_ratings(company)
-    banking    = get_banking_history(company)
-    audit      = get_audit_findings(company)
-
-    latest           = financials[-1] if financials else {}
-    total_outstanding = sum(b.get("outstanding_amt", 0) or 0 for b in banking)
-
-    revenue        = latest.get("revenue") or 0
-    suggested_loan = round(float(revenue) * 0.25, 2)
-
-    prompt = f"""
-You are a senior credit analyst writing a Credit Assessment Memo (CAM).
-Write Section 5 — the final section covering:
-1. Proposed Credit Structure — facility type, amount, tenor, rate, repayment, covenants
-2. Final Recommendation — Approve / Decline / Approve with conditions
-3. Key Conditions and Covenants
-
-Be decisive. State specific numbers. Formal banking language. Figures in Rs Lakhs.
-
-SUMMARY:
-Company:              {profile.get('company_name')}
-SAVE Rating:          {risk.get('save_rating')} ({risk.get('save_score')}/100)
-Latest Revenue:       Rs{latest.get('revenue')}L ({latest.get('fiscal_year')})
-PAT:                  Rs{latest.get('pat')}L | Margin: {latest.get('pat_margin')}%
-DSCR:                 {latest.get('dscr')}x | ICR: {latest.get('icr')}x
-D/E:                  {latest.get('debt_equity_ratio')}x
-Total Borrowings:     Rs{round(total_outstanding, 2)}L
-Auditor Opinion:      {audit.get('opinion')}
-Going Concern:        {audit.get('summary_assessment', {}).get('going_concern')}
-Fraud:                {audit.get('summary_assessment', {}).get('fraud')}
-
-PREVIOUS SECTIONS:
-Overview:      {state['sections'].get('overview', '')[:300]}...
-Financial:     {state['sections'].get('financial', '')[:300]}...
-Industry:      {state['sections'].get('industry', '')[:300]}...
-Risk:          {state['sections'].get('risk', '')[:300]}...
-
-Suggested Facility Amount: Rs {suggested_loan} Lakhs
-(calculated as 25% of latest annual revenue of Rs {revenue} Lakhs)
-
-Query: {state['input_query']}
-"""
-    return run_section(state, "recommendation", prompt)
+    retries = state["retry_count"].get("recommendation", 0)
+    mark_task("recommendation", "in_progress")
+    print(f"\n[RECOMMENDATION Agent] Running... (attempt {retries + 1}/3)")
+    try:
+        content = sga.generate(state["company_name"], "generate_recommendation")
+        mark_task("recommendation", "done")
+        print("[Queue] recommendation done")
+        return {
+            "sections":        {**state.get("sections", {}), "recommendation": content},
+            "completed_tasks": state.get("completed_tasks", []) + ["recommendation"],
+            "current_task":    "recommendation"
+        }
+    except Exception as e:
+        mark_task("recommendation", "failed", str(e))
+        increment_retry("recommendation")
+        new_retries = dict(state["retry_count"])
+        new_retries["recommendation"] = retries + 1
+        return {"errors": {**state.get("errors", {}), "recommendation": str(e)}, "retry_count": new_retries}
 
 # RETRY HANDLER
 def retry_failed_sections(state: CAMState) -> dict:
@@ -406,14 +331,9 @@ def retry_failed_sections(state: CAMState) -> dict:
 
         try:
             time.sleep(3)
-            res = llm.invoke(
-                f"You are a senior credit analyst. "
-                f"Retry writing the {section} section of a Credit Assessment Memo "
-                f"for {state['company_name']}. "
-                f"Previous attempt failed with: {error_msg}. "
-                f"Write a complete professional {section} section."
-            )
-            new_sections[section]  = res.content
+            task_type = f"generate_{section}"
+            content = sga.generate(state["company_name"], task_type)
+            new_sections[section]  = content
             new_retries[section]   = current_retries + 1
             completed.append(section)
             mark_task(section, "done")
@@ -446,7 +366,7 @@ def combine_cam(state: CAMState) -> dict:
     print("[Combine] Assembling final CAM...")
     print("="*50)
 
-    for section in ["overview", "financial", "industry", "risk", "recommendation"]:
+    for section in ["overview", "financial", "credit_profile", "risk", "recommendation"]:
         status = "✓" if section in s else "✗ missing"
         print(f"  {section:<20} {status}")
 
@@ -466,8 +386,8 @@ SECTION 2 — FINANCIAL ANALYSIS
 {s.get("financial", "[Not generated]")}
 
 {"-"*60}
-SECTION 3 — BANKING & CREDIT HISTORY
-{s.get("industry", "[Not generated]")}
+SECTION 3 — EXISTING DEBT & CREDIT PROFILE
+{s.get("credit_profile", "[Not generated]")}
 
 {"-"*60}
 SECTION 4 — RISK ASSESSMENT & SECURITY
@@ -559,8 +479,76 @@ SECTION 5 — CREDIT STRUCTURE & RECOMMENDATION
 
         # ── Helper — parse and write content ────────────────
         def write_content(doc, content):
-            for line in content.split("\n"):
-                line = line.strip()
+            import re
+            from docx.enum.table import WD_TABLE_ALIGNMENT
+
+            lines = content.split("\n")
+            idx = 0
+
+            while idx < len(lines):
+                line = lines[idx].strip()
+
+                # ── Markdown table detection ──────────────────
+                if line.startswith("|") and line.endswith("|"):
+                    table_lines = []
+                    while idx < len(lines) and lines[idx].strip().startswith("|"):
+                        table_lines.append(lines[idx].strip())
+                        idx += 1
+
+                    # drop separator rows like | --- | :---: |
+                    data_rows = [
+                        r for r in table_lines
+                        if not re.match(r'^\|[\s\-\|:]+\|$', r)
+                    ]
+                    if not data_rows:
+                        continue
+
+                    parsed = []
+                    for row in data_rows:
+                        cells = [c.strip() for c in row.strip("|").split("|")]
+                        parsed.append(cells)
+
+                    num_cols = max(len(r) for r in parsed)
+                    tbl = doc.add_table(rows=len(parsed), cols=num_cols)
+                    tbl.style = "Table Grid"
+                    tbl.alignment = WD_TABLE_ALIGNMENT.LEFT
+
+                    for ri, row_data in enumerate(parsed):
+                        row_obj = tbl.rows[ri]
+                        for ci in range(num_cols):
+                            cell = row_obj.cells[ci]
+                            text = row_data[ci] if ci < len(row_data) else ""
+                            text = text.replace("**", "")
+                            para = cell.paragraphs[0]
+                            run = para.add_run(text)
+                            run.font.size = Pt(9.5)
+
+                            if ri == 0:
+                                # Header row — dark blue bg, white bold text
+                                run.bold = True
+                                run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                                tcPr = cell._tc.get_or_add_tcPr()
+                                shd = OxmlElement('w:shd')
+                                shd.set(qn('w:val'), 'clear')
+                                shd.set(qn('w:color'), 'auto')
+                                shd.set(qn('w:fill'), '003366')
+                                tcPr.append(shd)
+                            else:
+                                run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+                                # Alternate row shading
+                                if ri % 2 == 0:
+                                    tcPr = cell._tc.get_or_add_tcPr()
+                                    shd = OxmlElement('w:shd')
+                                    shd.set(qn('w:val'), 'clear')
+                                    shd.set(qn('w:color'), 'auto')
+                                    shd.set(qn('w:fill'), 'EAF0F8')
+                                    tcPr.append(shd)
+
+                    doc.add_paragraph("")
+                    continue
+
+                # ── All existing line-level handlers ──────────
+                idx += 1
 
                 if not line:
                     doc.add_paragraph("")
@@ -570,6 +558,7 @@ SECTION 5 — CREDIT STRUCTURE & RECOMMENDATION
                 if line.startswith("* ") or line.startswith("- ") or line.startswith("+ "):
                     line = line[2:]
                     para = doc.add_paragraph(style="List Bullet")
+                    para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                     parts = line.split("**")
                     for i, part in enumerate(parts):
                         if not part:
@@ -587,6 +576,7 @@ SECTION 5 — CREDIT STRUCTURE & RECOMMENDATION
                     run = para.add_run(line)
                     run.font.size = Pt(10.5)
                     continue
+
                 # handle ### subheadings
                 if line.startswith("### "):
                     line = line[4:]
@@ -610,6 +600,7 @@ SECTION 5 — CREDIT STRUCTURE & RECOMMENDATION
                 # numbered list
                 if len(line) > 2 and line[0].isdigit() and line[1] in ".):":
                     para = doc.add_paragraph(style="List Number")
+                    para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                     parts = line.split("**")
                     for i, part in enumerate(parts):
                         if not part:
@@ -632,6 +623,7 @@ SECTION 5 — CREDIT STRUCTURE & RECOMMENDATION
                 # normal paragraph with bold parsing
                 para = doc.add_paragraph()
                 para.paragraph_format.space_after = Pt(4)
+                para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                 parts = line.split("**")
                 for i, part in enumerate(parts):
                     if not part:
@@ -643,11 +635,11 @@ SECTION 5 — CREDIT STRUCTURE & RECOMMENDATION
 
         # ── Write Sections ───────────────────────────────────
         section_map = {
-            "SECTION 1 — BORROWER OVERVIEW & BACKGROUND":    s.get("overview",       "[Not generated]"),
-            "SECTION 2 — FINANCIAL ANALYSIS":                s.get("financial",      "[Not generated]"),
-            "SECTION 3 — BANKING & CREDIT HISTORY":          s.get("industry",       "[Not generated]"),
-            "SECTION 4 — RISK ASSESSMENT & SECURITY":        s.get("risk",           "[Not generated]"),
-            "SECTION 5 — CREDIT STRUCTURE & RECOMMENDATION": s.get("recommendation", "[Not generated]"),
+            "SECTION 1 — BORROWER OVERVIEW & BACKGROUND":    s.get("overview",        "[Not generated]"),
+            "SECTION 2 — FINANCIAL ANALYSIS":                s.get("financial",       "[Not generated]"),
+            "SECTION 3 — EXISTING DEBT & CREDIT PROFILE":    s.get("credit_profile",  "[Not generated]"),
+            "SECTION 4 — RISK ASSESSMENT & SECURITY":        s.get("risk",            "[Not generated]"),
+            "SECTION 5 — CREDIT STRUCTURE & RECOMMENDATION": s.get("recommendation",  "[Not generated]"),
         }
 
         for heading, content in section_map.items():
@@ -677,7 +669,12 @@ SECTION 5 — CREDIT STRUCTURE & RECOMMENDATION
             write_content(doc, content)
             doc.add_paragraph("")
 
-        doc.save(OUTPUT_CAM_PATH)
+        # Save to a temp file first — avoids hang if the output
+        # file is currently open in Word or a PDF viewer
+        import tempfile, shutil
+        tmp_path = OUTPUT_CAM_PATH + ".tmp"
+        doc.save(tmp_path)
+        shutil.move(tmp_path, OUTPUT_CAM_PATH)
         print(f"\n[Combine] CAM saved to: {OUTPUT_CAM_PATH}")
 
     except Exception as e:
@@ -694,13 +691,12 @@ graph.add_node("orchestrator",   orchestrator)
 graph.add_node("parser",         parser_node)
 graph.add_node("overview",       overview_agent)
 graph.add_node("financial",      financial_agent)
-graph.add_node("industry",       industry_agent)
+graph.add_node("credit_profile", credit_profile_agent)
 graph.add_node("risk",           risk_agent)
 graph.add_node("recommendation", recommendation_agent)
 graph.add_node("retry",          retry_failed_sections)
 graph.add_node("combine",        combine_cam)
 
-# edges
 # edges
 graph.add_edge(START,            "orchestrator")
 graph.add_edge("orchestrator",   "parser")
@@ -709,12 +705,12 @@ graph.add_edge("orchestrator",   "parser")
 graph.add_edge("parser",         "overview")
 graph.add_edge("parser",         "financial")
 
-# overview → industry
-graph.add_edge("overview",       "industry")
+# overview → credit_profile (renamed from industry)
+graph.add_edge("overview",       "credit_profile")
 
-# financial + industry → risk
+# financial + credit_profile → risk
 graph.add_edge("financial",      "risk")
-graph.add_edge("industry",       "risk")
+graph.add_edge("credit_profile", "risk")
 
 # risk → recommendation
 graph.add_edge("risk",           "recommendation")
@@ -725,20 +721,19 @@ graph.add_edge("recommendation", "retry")
 # retry → combine → END
 graph.add_edge("retry",          "combine")
 graph.add_edge("combine",        END)
-
 app = graph.compile()
 
 if __name__ == "__main__":
 
     result = app.invoke({
-        "input_query":      "Arjun Textiles Limited — Working Capital Enhancement",
+        "input_query":      "Passionfruit Inc — Working Capital Enhancement",
         "sections":         {},
         "errors":           {},
         "retry_count": {
             "parse":            0,
             "overview":         0,
             "financial":        0,
-            "industry":         0,
+            "credit_profile":   0,
             "risk":             0,
             "recommendation":   0
         },
