@@ -769,7 +769,7 @@ app = graph.compile()
 if __name__ == "__main__":
 
     result = app.invoke({
-        "input_query":      "ARJUN TEXTILES LIMITED",
+        "input_query":      "Sri Ramakrishna Mills",
         "sections":         {},
         "errors":           {},
         "inconsistencies": [],

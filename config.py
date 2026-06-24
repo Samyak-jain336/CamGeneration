@@ -40,10 +40,16 @@ GEMINI_MODEL   = "gemini-3.1-flash-lite"
     "save_risk":     "inputs1/Passionfruit_Inc_SAVE_Risk_FY2025.xlsx"  
 }
 '''
-DOC_PATHS = {
+'''DOC_PATHS = {
     "annual_report": "NewInputs/annualReport.pdf",
     "audit_report":  "NewInputs/auditReport.pdf",
     "save_risk":     "NewInputs/saveRisk.xlsx"  
+}'''
+
+DOC_PATHS = {
+    "annual_report": "Sri_Ramakrishna_Mills_Inputs/annual-report-for-the-year-2023-24.pdf",
+    "audit_report":  "Sri_Ramakrishna_Mills_Inputs/AuditReport.pdf",
+    "save_risk":     "Sri_Ramakrishna_Mills_Inputs/saveRisk_SriRamakrishnaMills.xlsx"  
 }
 
 '''
@@ -54,7 +60,7 @@ DOC_PATHS = {
 }'''
 
 # -- Output --------------------------------------------------
-OUTPUT_CAM_PATH = "outputs/final_cam1.docx"
+OUTPUT_CAM_PATH = "outputs/Sri_Ramakrishna_Mills_cam1.docx"
 
 # -- Queue / Retry -------------------------------------------
 MAX_RETRIES = 3
