@@ -31,7 +31,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL   = "gpt-4o-mini"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL   = "gemini-3.1-flash-lite"
+GEMINI_MODEL   = "gemini-2.5-flash"
 
 # -- Input Document Paths ------------------------------------
 '''DOC_PATHS = {
@@ -60,7 +60,7 @@ DOC_PATHS = {
 }'''
 
 # -- Output --------------------------------------------------
-OUTPUT_CAM_PATH = "outputs/Sri_Ramakrishna_Mills_cam1.docx"
+OUTPUT_CAM_PATH = "outputs/Sri_Ramakrishna_Mills_cam2.docx"
 
 # -- Queue / Retry -------------------------------------------
 MAX_RETRIES = 3

@@ -64,21 +64,17 @@ SYSTEM_PROMPT = (
 # ============================================================
 
 def fix_math_expressions_in_json(raw: str) -> str:
-    """
-    If the LLM writes arithmetic expressions instead of final numbers
-    as JSON values (e.g. "total_revenue": 8547 + 62), evaluate them
-    down to a plain number before json.loads() runs.
-    """
     pattern = re.compile(
-        r'(:\s*)([\(\)\d\.\s\+\-\*\/]+)([,\}\n])'
+        r'("\w+"\s*:\s*)([\(\)\d\.\s\+\-\*\/]+)([,\}\n])'
     )
-
     def try_eval(match):
         prefix, expr, suffix = match.groups()
         stripped = expr.strip()
         if re.fullmatch(r'-?\d+(\.\d+)?', stripped):
             return match.group(0)
-        if not re.search(r'[\+\-\*\/]', stripped):
+        # Only treat as arithmetic if there's a clearly-spaced operator,
+        # e.g. "8547 + 62" — never a tight hyphen like "1998-99" or "13-08-2024"
+        if not re.search(r'\d\s[\+\-\*\/]\s\d', stripped):
             return match.group(0)
         try:
             value = eval(stripped, {"__builtins__": {}}, {})
@@ -87,7 +83,6 @@ def fix_math_expressions_in_json(raw: str) -> str:
         except Exception:
             pass
         return match.group(0)
-
     return pattern.sub(try_eval, raw)
 
 
@@ -444,27 +439,49 @@ def extract_json_from_text(text: str, prompt: str, merge_mode: str = "dict"):
 # FINANCIALS DEDUPLICATION
 # ============================================================
 
-def deduplicate_financials(rows: list) -> list:
+def deduplicate_list_rows(rows: list, key_fields: list, require_key: bool = False) -> list:
     """
-    If the same fiscal year appears multiple times across chunks,
-    keep the row with the most non-null fields.
+    Generic dedup for merge_mode='list' extractions split across
+    overlapping chunks. Same key_fields → same row; keep the one
+    with the most non-null fields.
+
+    require_key=True skips rows where every key field is empty/falsy
+    (financials rows with no fiscal_year have nothing to key on).
     """
     best = {}
     for row in rows:
-        fy = row.get("fiscal_year", "")
-        if not fy:
+        key = tuple(row.get(f) for f in key_fields)
+        if require_key and not any(key):
             continue
-        non_nulls = sum(
-            1 for v in row.values()
-            if v is not None and v != "" and v != "null"
-        )
-        if fy not in best or non_nulls > best[fy]["score"]:
-            best[fy] = {"row": row, "score": non_nulls}
-
+        non_nulls = sum(1 for v in row.values() if v not in (None, "", "null"))
+        if key not in best or non_nulls > best[key]["score"]:
+            best[key] = {"row": row, "score": non_nulls}
     deduped = [entry["row"] for entry in best.values()]
-    print(f"[Parser] Financials: {len(rows)} raw rows → {len(deduped)} after dedup")
+    print(f"[Parser] Deduped on {key_fields}: {len(rows)} → {len(deduped)}")
     return deduped
 
+
+PROMOTER_KW = ["promoter"]
+INSTITUTIONAL_KW = ["bank", "institution", "fii", "dii", "mutual fund",
+                     "insurance", "body corporate", "bodies corporate"]
+
+def bucket_shareholding(categories: list) -> dict:
+    """
+    Buckets raw shareholding categories (any number, any labels) into
+    promoter / institutional / non-institutional. Every category lands
+    in exactly one bucket — the three numbers always sum to ~100%.
+    """
+    promoter = inst = non_inst = 0.0
+    for c in categories:
+        label = (c.get("category") or "").lower()
+        pct = c.get("pct") or 0
+        if any(k in label for k in PROMOTER_KW):
+            promoter += pct
+        elif any(k in label for k in INSTITUTIONAL_KW):
+            inst += pct
+        else:
+            non_inst += pct
+    return {"promoter_pct": promoter, "public_inst_pct": inst, "public_non_inst_pct": non_inst}
 
 # ============================================================
 # PROMPT TEMPLATES — one per extraction category
@@ -486,11 +503,9 @@ Extract by meaning, not by label — labels vary across jurisdictions.
   "business_nature": "extract what the company does — products, services, industry description, or null",
   "promoters": [{"name": "extract name", "designation": "extract role"}],
   "key_management": [{"name": "extract name", "designation": "extract role", "qualification": "extract if available else null", "experience": "extract years or description if available else null"}],
-  "shareholding": {
-    "promoter_pct": "extract promoter or founder ownership percentage as number or null",
-    "public_inst_pct": "extract institutional investor ownership percentage as number or null",
-    "public_non_inst_pct": "extract retail or non-institutional ownership percentage as number or null"
-  }
+  "shareholding_categories": [
+    {"category": "extract exact category label as printed, e.g. 'Promoters Holding', 'Other Bodies Corporate', 'Non Resident Indians'", "pct": "extract percentage as number"}
+  ]
 }
 
 IMPORTANT: Extract ALL executives, directors, and officers listed in the document — not just the CEO.
@@ -564,6 +579,15 @@ Extract debt and credit profile information from this financial document.
 Return ONLY a valid JSON array, no explanation, no markdown fences.
 If a field isn't found in this chunk, return null — never guess or fabricate.
 Extract EVERY debt instrument mentioned: term loans, bonds, debentures, credit facilities, notes, etc.
+ONLY extract a row if the source text explicitly identifies it as a loan, borrowing,
+credit facility, deposit, debenture, or bond — typically with stated terms (security,
+tenor, interest rate) in a dedicated "Borrowings" or "Loans" note.
+
+Do NOT extract amounts from a generic "outstanding balance" / "amounts due to/from
+related parties" table unless that specific row explicitly calls it a loan or advance.
+If the nature of a related-party balance is ambiguous (could be a payable, lease, or
+trade balance rather than a loan), set instrument_type to "Related Party Balance —
+Unclassified" instead of labeling it a loan.
 
 [
   {
@@ -733,6 +757,8 @@ def parse_annual_report(company_name: str):
     # ── 1. PROFILE ──────────────────────────────────────────
     print("\n[Parser] === Extracting: PROFILE ===")
     profile = extract_json_from_text(text, PROFILE_PROMPT, merge_mode="dict")
+    if "shareholding_categories" in profile:
+        profile["shareholding"] = bucket_shareholding(profile["shareholding_categories"])
     save_borrower_profile(profile)
     print("[Parser] Borrower profile saved.")
     time.sleep(3)
@@ -740,7 +766,7 @@ def parse_annual_report(company_name: str):
     # ── 2. FINANCIALS ───────────────────────────────────────
     print("\n[Parser] === Extracting: FINANCIALS ===")
     financials_raw = extract_json_from_text(text, FINANCIALS_PROMPT, merge_mode="list")
-    financials = deduplicate_financials(financials_raw)
+    financials = deduplicate_list_rows(financials_raw, ["fiscal_year"], require_key=True)
     if financials:
         save_financials(financials)
     print(f"[Parser] Financials saved: {len(financials)} year(s).")
@@ -748,7 +774,8 @@ def parse_annual_report(company_name: str):
 
     # ── 3. CREDIT PROFILE ───────────────────────────────────
     print("\n[Parser] === Extracting: CREDIT PROFILE ===")
-    credit = extract_json_from_text(text, CREDIT_PROMPT, merge_mode="list")
+    credit_raw = extract_json_from_text(text, CREDIT_PROMPT, merge_mode="list")
+    credit = deduplicate_list_rows(credit_raw, ["instrument_type", "counterparty", "outstanding_amt", "fiscal_year"])
     if credit:
         save_credit_profile(credit)
     print(f"[Parser] Credit profile saved: {len(credit)} instrument(s).")
@@ -756,7 +783,8 @@ def parse_annual_report(company_name: str):
 
     # ── 4. COLLATERAL ───────────────────────────────────────
     print("\n[Parser] === Extracting: COLLATERAL ===")
-    collateral = extract_json_from_text(text, COLLATERAL_PROMPT, merge_mode="list")
+    collateral_raw = extract_json_from_text(text, COLLATERAL_PROMPT, merge_mode="list")
+    collateral = deduplicate_list_rows(collateral_raw, ["security_type", "description", "value_lakhs"])
     if collateral:
         save_collateral_info(collateral)
     print(f"[Parser] Collateral saved: {len(collateral)} item(s).")
@@ -834,7 +862,7 @@ def run_parser_agent(company_name: str):
     cursor = conn.cursor()
     for table in ["borrower_profile", "financials", "audit_findings",
                   "risk_ratings", "credit_profile", "collateral_info",
-                  "raw_documents"]:
+                  "raw_documents", "inconsistencies"]:
         cursor.execute(f"TRUNCATE TABLE {table}")
     conn.commit()
     cursor.close()
