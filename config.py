@@ -45,11 +45,17 @@ GEMINI_MODEL   = "gemini-2.5-flash"
     "audit_report":  "NewInputs/auditReport.pdf",
     "save_risk":     "NewInputs/saveRisk.xlsx"  
 }'''
-
+'''
 DOC_PATHS = {
     "annual_report": "Sri_Ramakrishna_Mills_Inputs/annual-report-for-the-year-2023-24.pdf",
     "audit_report":  "Sri_Ramakrishna_Mills_Inputs/AuditReport.pdf",
     "save_risk":     "Sri_Ramakrishna_Mills_Inputs/saveRisk_SriRamakrishnaMills.xlsx"  
+}'''
+
+DOC_PATHS = {
+    "annual_report": "durlax/Annual_Report_2024-25.pdf",
+    "audit_report":  "durlax/Audit_Report_2024-25.pdf",
+    "save_risk":     "durlax/Durlax_Top_Surface_SAVE_Risk.xlsx"  
 }
 
 '''
@@ -60,7 +66,7 @@ DOC_PATHS = {
 }'''
 
 # -- Output --------------------------------------------------
-OUTPUT_CAM_PATH = "outputs/Sri_Ramakrishna_Mills_cam2.docx"
+OUTPUT_CAM_PATH = "outputs/durlax_cam.docx"
 
 # -- Queue / Retry -------------------------------------------
 MAX_RETRIES = 3

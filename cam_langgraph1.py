@@ -769,7 +769,7 @@ app = graph.compile()
 if __name__ == "__main__":
 
     result = app.invoke({
-        "input_query":      "Sri Ramakrishna Mills",
+        "input_query":      "Durlax Top Surface",
         "sections":         {},
         "errors":           {},
         "inconsistencies": [],
